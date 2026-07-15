@@ -322,51 +322,49 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE ---
-@st.cache_data(ttl=600) # Salviamo in cache per 10 minuti per evitare continue chiamate API rallentando il browser
+# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (RISOLTO PROBLEMA FORMATO/FUSO) ---
+@st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
-    # Scarichiamo le previsioni orarie per la coordinata centrale del percorso
-    giorno_inizio_str = data_partenza.strftime("%Y-%m-%d")
-    giorno_fine = data_partenza + timedelta(days=2)
-    giorno_fine_str = giorno_fine.strftime("%Y-%m-%d")
-    
-    url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto&start_date={giorno_inizio_str}&end_date={giorno_fine_str}"
+    # Usiamo forecast_days=3: è il formato più robusto e veloce per le previsioni a breve termine
+    url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto&forecast_days=3"
     
     try:
         res = requests.get(url).json()
         if "hourly" not in res:
             return []
             
-        times = res["hourly"]["time"]
+        times_str = res["hourly"]["time"]
         temps = res["hourly"]["temperature_2m"]
         codes = res["hourly"]["weather_code"]
         winds = res["hourly"]["wind_speed_10m"]
-        elevation_modello = res.get("elevation", 500) # Quota media usata dal modello meteo per quella griglia
+        elevation_modello = res.get("elevation", 500) # Quota di riferimento del modello
+        
+        # Trasformiamo le stringhe dell'API in veri oggetti datetime per confrontarli matematicamente
+        api_datetimes = [datetime.fromisoformat(t) for t in times_str]
         
         previsioni_lungo_corsa = []
         
-        # Campioniamo i dati ogni tot chilometri per non affollare la schermata (es. max 6 punti intermedi della gara)
+        # Campioniamo i dati lungo il percorso (max 6 rilevazioni per non affollare la tabella)
         km_totali = len(mappa_orari)
         step_campionamento = max(1, km_totali // 6)
         
         for km in range(1, km_totali + 1, step_campionamento):
             dati_km = mappa_orari[km]
             
-            # Calcoliamo l'orario effettivo di passaggio in quel chilometro
+            # Orario teorico di passaggio in questo specifico chilometro
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
-            ora_passaggio_arrotondata = tempo_passaggio.replace(minute=0, second=0, microsecond=0)
             
-            # Troviamo l'indice orario corrispondente nei dati di Open-Meteo
-            ora_passaggio_iso = ora_passaggio_arrotondata.strftime("%Y-%m-%dT%H:%M")
+            # Trova l'indice del momento più vicino fornito dall'API (tolleranza massima)
+            differenze = [abs((api_dt - tempo_passaggio).total_seconds()) for api_dt in api_datetimes]
+            idx = differenze.index(min(differenze))
             
-            try:
-                idx = times.index(ora_passaggio_iso)
+            # Se la differenza è inferiore a 1 ora, prendiamo il dato come valido
+            if differenze[idx] <= 3600:
                 temp_modello = temps[idx]
                 codice_wmo = codes[idx]
                 vento = winds[idx]
                 
-                # --- APPLICAZIONE GRADIENTE TERMICO VERTICALE REALISTICO ---
-                # Corregge la temperatura stimata dal modello di circa 0.65°C ogni 100m di differenza
+                # Correzione termica dinamica in quota (gradiente verticale)
                 differenza_quota = dati_km["ele"] - elevation_modello
                 temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
                 
@@ -378,14 +376,13 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                     "Vento al Suolo": f"{vento:.1f} km/h",
                     "Temp. Base Modello (rif.)": f"{temp_modello:.1f} °C"
                 })
-            except ValueError:
-                # Se l'orario di passaggio calcolato cade oltre la previsione disponibile (es. oltre i 3 giorni)
-                continue
                 
         return previsioni_lungo_corsa
     except Exception as e:
+        # Se qualcosa va storto, lo mostriamo chiaramente in sidebar per il debug
+        st.sidebar.error(f"Errore API Meteo: {e}")
         return []
-
+        
 # --- CODICE EMBED MAPPA SATELLITARE 3D ---
 
 def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, punti_altimetria):
