@@ -281,6 +281,7 @@ def calcola_pacer_tabella(df_punti, ore_target):
         secondi = int((passo_minuti_decimale - minuti) * 60)
         passo_str = f"{minuti:02d}:{secondi:02d} /km"
         
+        cronologia_cumulata += seconds_km = secondi_km
         cronologia_cumulata += secondi_km
         ore_cum = int(cronologia_cumulata / 3600)
         min_cum = int((cronologia_cumulata % 3600) / 60)
@@ -319,10 +320,9 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (URL CORRETTO) ---
+# --- CALCOLO METEO IN CORSA CON RICERCA DI PROSSIMITÀ ---
 @st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
-    # Rimosso '/en' dall'URL per utilizzare l'endpoint ufficiale funzionante
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,weather_code,wind_speed_10m&timezone=Europe/Rome&forecast_days=3"
     
     try:
@@ -335,14 +335,11 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         codes = res["hourly"]["weather_code"]
         winds = res["hourly"]["wind_speed_10m"]
         
-        # Gestiamo in sicurezza la quota media del modello
         elevation_modello = res.get("elevation")
         if elevation_modello is None:
             elevation_modello = 500
             
-        # Trasformiamo le stringhe ISO in oggetti datetime per il confronto matematico
         api_datetimes = [datetime.fromisoformat(t) for t in times_str]
-        
         previsioni_lungo_corsa = []
         
         km_totali = len(mappa_orari)
@@ -352,7 +349,6 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
             dati_km = mappa_orari[km]
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
             
-            # Calcolo della prossimità oraria assoluta
             differenze_secondi = [abs((api_dt - tempo_passaggio).total_seconds()) for api_dt in api_datetimes]
             idx = differenze_secondi.index(min(differenze_secondi))
             
@@ -361,7 +357,6 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                 codice_wmo = codes[idx]
                 vento = winds[idx]
                 
-                # Correzione termica basata sul gradiente verticale (0.65°C ogni 100m)
                 differenza_quota = dati_km["ele"] - elevation_modello
                 temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
                 
@@ -379,12 +374,13 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         st.error(f"Dettaglio Errore Meteo: {e}")
         return []
 
-# --- CODICE EMBED MAPPA SATELLITARE 3D ---
+# --- CODICE EMBED MAPPA SATELLITARE 3D (CON TRATTI CRITICI INTEGRATI) ---
 
-def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, punti_altimetria):
+def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, punti_altimetria, tratti_critici):
     geojson_str = json.dumps(geojson_traccia)
     kp_json = json.dumps(key_points)
     punti_altimetria_json = json.dumps(punti_altimetria)
+    tratti_critici_json = json.dumps(tratti_critici)
     
     html_code = f"""
     <!DOCTYPE html>
@@ -457,12 +453,26 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                 background: #28C864;
                 color: #0f172a;
             }}
+            .crit-btn-salita {{
+                background: #ef4444 !important;
+                color: white !important;
+            }}
+            .crit-btn-salita:hover {{
+                background: #f87171 !important;
+            }}
+            .crit-btn-discesa {{
+                background: #3b82f6 !important;
+                color: white !important;
+            }}
+            .crit-btn-discesa:hover {{
+                background: #60a5fa !important;
+            }}
             .reset-btn {{
-                background: #ef4444;
+                background: #475569;
             }}
             .reset-btn:hover {{
-                background: #f87171;
-                color: #fff;
+                background: #cbd5e1;
+                color: #000;
             }}
             
             .mapboxgl-popup-content, .maplibregl-popup-content {{
@@ -472,9 +482,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                 border-radius: 12px !important;
                 padding: 12px 15px !important;
                 box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5) !important;
-            }}
-            .mapboxgl-popup-anchor-top .mapboxgl-popup-tip, .maplibregl-popup-anchor-top .maplibregl-popup-tip {{
-                border-bottom-color: #0f172a !important;
             }}
         </style>
     </head>
@@ -487,10 +494,13 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
         </div>
 
         <div class="km-selector-container">
-            <div class="km-selector-title">👁️ Esplora Visuale Soggettiva (First-Person)</div>
-            <div class="km-btn-group" id="btn-group">
+            <div class="km-selector-title">👁️ Punti Chiave del Percorso</div>
+            <div class="km-btn-group" id="btn-group-km">
                 <button class="km-btn reset-btn" id="btn-reset">Vista Globale</button>
             </div>
+            
+            <div class="km-selector-title" style="margin-top: 10px;" id="title-critici">⚠️ Muri & Tratti Critici</div>
+            <div class="km-btn-group" id="btn-group-critici"></div>
         </div>
 
         <div class="map-overlay">
@@ -545,6 +555,7 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
             const geojsonTraccia = {geojson_str};
             const keyPoints = {kp_json};
             const datiAltimetria = {punti_altimetria_json};
+            const trattiCritici = {tratti_critici_json};
             
             let cursorMarker = null;
 
@@ -686,21 +697,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     }}
                 }});
 
-                window.addEventListener('message', (event) => {{
-                    try {{
-                        const data = JSON.parse(event.data);
-                        if (data.action === 'flyToPoint' && data.lat && data.lon) {{
-                            map.flyTo({{
-                                center: [data.lon, data.lat],
-                                zoom: 16.5,
-                                pitch: 75,
-                                essential: true,
-                                duration: 2500
-                            }});
-                        }}
-                    }} catch(err) {{}}
-                }});
-
                 map.on('click', 'gpx-route-layer', (e) => {{
                     const coordinates = e.lngLat;
                     const properties = e.features[0].properties;
@@ -738,7 +734,8 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     map.getCanvas().style.cursor = '';
                 }});
 
-                const btnGroup = document.getElementById('btn-group');
+                // Costruisci bottoni per i Km standard
+                const btnGroupKm = document.getElementById('btn-group-km');
                 keyPoints.forEach((kp) => {{
                     const btn = document.createElement('button');
                     btn.className = 'km-btn';
@@ -753,8 +750,34 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                             duration: 2500
                         }});
                     }};
-                    btnGroup.appendChild(btn);
+                    btnGroupKm.appendChild(btn);
                 }});
+
+                // --- GENERATORE DINAMICO BOTTONI DEI TRATTI CRITICI (SULLA MAPPA) ---
+                const btnGroupCritici = document.getElementById('btn-group-critici');
+                const titleCritici = document.getElementById('title-critici');
+                
+                if (trattiCritici.length > 0) {{
+                    trattiCritici.forEach((tratto) => {{
+                        const btn = document.createElement('button');
+                        btn.className = tratto.Tipo === "Salita" ? "km-btn crit-btn-salita" : "km-btn crit-btn-discesa";
+                        btn.innerText = (tratto.Tipo === "Salita" ? "🔴 Salita" : "🔵 Discesa") + " Km " + tratto["Inizio (Km)"].toFixed(1);
+                        btn.onclick = () => {{
+                            map.flyTo({{
+                                center: [tratto.lon, tratto.lat],
+                                zoom: 17,
+                                pitch: 78,
+                                bearing: 0,
+                                essential: true,
+                                duration: 2500
+                            }});
+                        }};
+                        btnGroupCritici.appendChild(btn);
+                    }});
+                }} else {{
+                    titleCritici.style.display = 'none';
+                    btnGroupCritici.style.display = 'none';
+                }}
 
                 document.getElementById('btn-reset').onclick = () => {{
                     map.flyTo({{
@@ -794,7 +817,6 @@ with st.sidebar:
         help="Inserisci il tempo target finale. Il sistema distribuirà il passo per km tenendo conto del dislivello reale."
     )
     
-    # --- CONFIGURAZIONE DATA E ORA PARTENZA METEO ---
     st.markdown("---")
     st.subheader("⏱️ Configurazione Partenza")
     data_giorno = st.date_input("Giorno Gara / Partenza", datetime.now().date())
@@ -860,7 +882,7 @@ if uploaded_file:
             df_meteo = pd.DataFrame(previsioni_strada)
             st.dataframe(df_meteo, use_container_width=True, hide_index=True)
         else:
-            st.warning("⚠️ Impossibile caricare le previsioni meteo per questa coordinata o l'orario di arrivo supera la finestra di previsione a 3 giorni.")
+            st.warning("⚠️ Impossibile caricare le previsioni meteo per questa coordinata o l'orario di passaggio supera la finestra di previsione a 3 giorni.")
         
         # --- TABELLA FASCE ALTIMETRICHE ---
         st.markdown("---")
@@ -885,34 +907,17 @@ if uploaded_file:
         
         lista_punti_json = df_punti[['distanza_km', 'ele', 'lat', 'lon']].to_dict(orient='records')
         
-        mappa_html = genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, lista_punti_json)
+        # Passiamo anche la lista dei tratti_critici a genera_mappa_3d_html per disegnare i bottoni speciali
+        mappa_html = genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, lista_punti_json, tratti_critici)
         components.html(mappa_html, height=altezza_mappa + 250)
         
         # --- TABELLA INTERATTIVA DEI TRATTI CRITICI ---
         st.markdown("---")
         st.subheader("⚠️ Analisi dei Tratti Critici (Salite e Discese Verticali)")
-        st.caption("La seguente tabella raggruppa le porzioni consecutive di sentiero che superano la pendenza tecnica selezionata. Clicca su un pulsante 'Tratto' per posizionare la telecamera in soggettiva all'inizio di quel tratto!")
+        st.caption("La seguente tabella riassume le porzioni di traccia che superano la pendenza tecnica selezionata. Usa i pulsanti colorati in alto (sulla mappa) per volare all'inizio di ogni tratto!")
         
         if tratti_critici:
             df_tratti = pd.DataFrame(tratti_critici)
-            
-            cols_grid = st.columns(min(len(tratti_critici), 6))
-            for idx, tratto in enumerate(tratti_critici[:12]):
-                with cols_grid[idx % len(cols_grid)]:
-                    colore_tipo = "🔴" if tratto["Tipo"] == "Salita" else "🔵"
-                    pulsante_testo = f"{colore_tipo} Tratto {tratto['ID']} (Km {tratto['Inizio (Km)']})"
-                    if st.button(pulsante_testo, key=f"btn_tratto_{tratto['ID']}"):
-                        js_fly = f"""
-                            <script>
-                                window.parent.postMessage(JSON.stringify({{
-                                    action: "flyToPoint",
-                                    lat: {tratto['lat']},
-                                    lon: {tratto['lon']}
-                                }}), "*");
-                            </script>
-                        """
-                        components.html(js_fly, height=0)
-            
             st.dataframe(
                 df_tratti[["ID", "Tipo", "Inizio (Km)", "Lunghezza (m)", "Pendenza Media (%)", "Dislivello (m)"]],
                 use_container_width=True,
