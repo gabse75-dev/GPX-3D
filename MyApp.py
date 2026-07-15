@@ -319,10 +319,10 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON RICERCA MATEMATICA DI PROSSIMITÀ (RISOLTO AL 100%) ---
+# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (INDENTAZIONE CORRETTA) ---
 @st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
-    # Chiediamo semplicemente 3 giorni di previsioni orarie a partire da oggi con fuso orario di Roma
+    # Chiediamo 3 giorni di previsioni orarie con fuso orario di Roma
     url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,weather_code,wind_speed_10m&timezone=Europe/Rome&forecast_days=3"
     
     try:
@@ -334,35 +334,34 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         temps = res["hourly"]["temperature_2m"]
         codes = res["hourly"]["weather_code"]
         winds = res["hourly"]["wind_speed_10m"]
-        elevation_modello = res.get("elevation", 500)
         
-        # Trasformiamo le stringhe ISO dell'API in veri oggetti datetime per fare confronti matematici
+        # Gestiamo in sicurezza la quota media del modello
+        elevation_modello = res.get("elevation")
+        if elevation_modello is None:
+            elevation_modello = 500
+            
+        # Trasformiamo le stringhe ISO in oggetti datetime per il confronto matematico
         api_datetimes = [datetime.fromisoformat(t) for t in times_str]
         
         previsioni_lungo_corsa = []
         
-        # Campioniamo i dati lungo la corsa (max 6 settori)
         km_totali = len(mappa_orari)
         step_campionamento = max(1, km_totali // 6)
         
         for km in range(1, km_totali + 1, step_campionamento):
             dati_km = mappa_orari[km]
-            
-            # Orario teorico di passaggio in questo specifico chilometro
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
             
-            # Calcoliamo la distanza temporale assoluta da tutti gli elementi forniti dall'API
-            # Troviamo l'indice del momento più vicino (in secondi)
+            # Calcolo della prossimità oraria assoluta
             differenze_secondi = [abs((api_dt - tempo_passaggio).total_seconds()) for api_dt in api_datetimes]
             idx = differenze_secondi.index(min(differenze_secondi))
             
-            # Accettiamo il punto se ricade entro 12 ore dalle previsioni generate (sarà sempre vero nei 3 giorni)
             if differenze_secondi[idx] <= 43200:
                 temp_modello = temps[idx]
                 codice_wmo = codes[idx]
                 vento = winds[idx]
                 
-                # Correzione termica (gradiente di 0.65°C ogni 100m rispetto alla quota di riferimento dell'API)
+                # Correzione termica basata sul gradiente verticale (0.65°C ogni 100m)
                 differenza_quota = dati_km["ele"] - elevation_modello
                 temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
                 
@@ -376,10 +375,11 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                 })
                 
         return previsioni_lungo_corsa
-        except Exception as e:
-        # Questo stamperà l'errore esatto direttamente sotto il titolo del meteo!
+    except Exception as e:
         st.error(f"Dettaglio Errore Meteo: {e}")
         return []
+
+
 
 # --- CODICE EMBED MAPPA SATELLITARE 3D ---
 
