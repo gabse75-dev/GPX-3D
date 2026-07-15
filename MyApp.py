@@ -322,16 +322,11 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (RISOLTO DEFINITIVAMENTE) ---
+# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (VERSIONE INCONDIZIONATA) ---
 @st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
-    # Calcoliamo esattamente il giorno d'inizio e fine basandoci sulla durata della corsa
-    giorno_inizio_str = data_partenza.strftime("%Y-%m-%d")
-    data_fine = data_partenza + timedelta(hours=float(ore_target) + 2) # Aggiungiamo un cuscinetto di 2 ore
-    giorno_fine_str = data_fine.strftime("%Y-%m-%d")
-    
-    # URL preciso con data di inizio, data di fine e fuso orario italiano esplicito
-    url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,weather_code,wind_speed_10m&timezone=Europe/Rome&start_date={giorno_inizio_str}&end_date={giorno_fine_str}"
+    # Chiediamo semplicemente 3 giorni di previsioni orarie a partire da oggi con fuso orario di Roma
+    url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,weather_code,wind_speed_10m&timezone=Europe/Rome&forecast_days=3"
     
     try:
         res = requests.get(url).json()
@@ -344,7 +339,7 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         winds = res["hourly"]["wind_speed_10m"]
         elevation_modello = res.get("elevation", 500)
         
-        # Creiamo un dizionario locale per mappare gli orari ISO8601 (es: "2026-07-15T16:00") ai loro dati meteo
+        # Creiamo il database orario indicizzando per data e ora
         database_meteo_orario = {}
         for idx, t_str in enumerate(times_str):
             database_meteo_orario[t_str] = {
@@ -362,10 +357,10 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         for km in range(1, km_totali + 1, step_campionamento):
             dati_km = mappa_orari[km]
             
-            # Orario teorico in cui il runner transiterà in quel Km
+            # Orario teorico di passaggio in questo specifico chilometro
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
             
-            # Arrotondiamo all'ora più vicina per fare la ricerca nel dizionario meteo dell'API
+            # Arrotondiamo all'ora più vicina
             minuti = tempo_passaggio.minute
             if minuti >= 30:
                 tempo_passaggio_arrotondato = tempo_passaggio + timedelta(hours=1)
@@ -374,14 +369,13 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                 
             chiave_ricerca_ora = tempo_passaggio_arrotondato.strftime("%Y-%m-%dT%H:00")
             
-            # Se l'orario di passaggio ricade nel nostro database meteo
             if chiave_ricerca_ora in database_meteo_orario:
                 dati_meteo = database_meteo_orario[chiave_ricerca_ora]
                 temp_modello = dati_meteo["temp"]
                 codice_wmo = dati_meteo["code"]
                 vento = dati_meteo["wind"]
                 
-                # Correzione termica dinamica (gradiente verticale di 0.65°C ogni 100m)
+                # Correzione termica (gradiente di 0.65°C ogni 100m rispetto alla quota di riferimento dell'API)
                 differenza_quota = dati_km["ele"] - elevation_modello
                 temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
                 
