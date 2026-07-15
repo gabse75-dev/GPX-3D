@@ -319,15 +319,17 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (INDENTAZIONE CORRETTA) ---
+# --- CALCOLO METEO CON DIAGNOSTICA INTEGRATA (TROVIAMO L'INGHIPPO!) ---
 @st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
-    # Chiediamo 3 giorni di previsioni orarie con fuso orario di Roma
     url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,weather_code,wind_speed_10m&timezone=Europe/Rome&forecast_days=3"
     
     try:
         res = requests.get(url).json()
+        
+        # DIAGNOSTICA 1: Se l'API restituisce un errore di chiamata
         if "hourly" not in res:
+            st.error(f"⚠️ Open-Meteo ha risposto con un errore o un formato imprevisto: {res}")
             return []
             
         times_str = res["hourly"]["time"]
@@ -335,14 +337,11 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         codes = res["hourly"]["weather_code"]
         winds = res["hourly"]["wind_speed_10m"]
         
-        # Gestiamo in sicurezza la quota media del modello
         elevation_modello = res.get("elevation")
         if elevation_modello is None:
             elevation_modello = 500
             
-        # Trasformiamo le stringhe ISO in oggetti datetime per il confronto matematico
         api_datetimes = [datetime.fromisoformat(t) for t in times_str]
-        
         previsioni_lungo_corsa = []
         
         km_totali = len(mappa_orari)
@@ -352,16 +351,15 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
             dati_km = mappa_orari[km]
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
             
-            # Calcolo della prossimità oraria assoluta
             differenze_secondi = [abs((api_dt - tempo_passaggio).total_seconds()) for api_dt in api_datetimes]
             idx = differenze_secondi.index(min(differenze_secondi))
             
+            # Tollariamo fino a 12 ore di differenza
             if differenze_secondi[idx] <= 43200:
                 temp_modello = temps[idx]
                 codice_wmo = codes[idx]
                 vento = winds[idx]
                 
-                # Correzione termica basata sul gradiente verticale (0.65°C ogni 100m)
                 differenza_quota = dati_km["ele"] - elevation_modello
                 temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
                 
@@ -373,12 +371,20 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                     "Vento al Suolo": f"{vento:.1f} km/h",
                     "Temp. Base Modello (rif.)": f"{temp_modello:.1f} °C"
                 })
+        
+        # DIAGNOSTICA 2: Se la chiamata è OK ma la lista dei passaggi è rimasta vuota
+        if not previsioni_lungo_corsa:
+            st.warning(
+                f"🔎 Diagnostica Tempi:\n\n"
+                f"- Ora Partenza Selezionata: {data_partenza}\n\n"
+                f"- Range orario coperto dall'API: da {times_str[0]} a {times_str[-1]}\n\n"
+                f"- Nessun passaggio calcolato è rientrato in questa finestra oraria."
+            )
                 
         return previsioni_lungo_corsa
     except Exception as e:
-        st.error(f"Dettaglio Errore Meteo: {e}")
+        st.error(f"Dettaglio Errore Esecuzione: {e}")
         return []
-
 
 
 # --- CODICE EMBED MAPPA SATELLITARE 3D ---
