@@ -4,13 +4,15 @@ import numpy as np
 import xml.etree.ElementTree as ET
 import math
 import json
+import requests
+from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
 # Configurazione pagina
 st.set_page_config(page_title="GPX 3D Alpine Analyzer", layout="wide")
 
 st.title("🏔️ GPX 3D Alpine Analyzer & Technical Route Mapper")
-st.write("Analisi avanzata con pacer integrato, rilevamento dei tratti critici e profilo altimetrico interattivo.")
+st.write("Analisi avanzata con pacer integrato, rilevamento dei tratti critici, profilo altimetrico e meteo dinamico in quota.")
 
 # --- CALCOLI GEOGRAFICI ---
 
@@ -174,7 +176,6 @@ def calcola_fasce_altimetriche(df_punti):
     if df_punti.empty or len(df_punti) < 2:
         return pd.DataFrame()
         
-    # Definiamo i limiti delle fasce
     limiti = [
         (-float('inf'), 1000, "Sotto i 1000 m"),
         (1000, 1500, "Tra 1000 m e 1500 m"),
@@ -188,16 +189,12 @@ def calcola_fasce_altimetriche(df_punti):
     
     distanze_fasce = {nome: 0.0 for _, _, nome in limiti}
     
-    # Scorriamo i punti per calcolare la distanza percorsa in ciascuna fascia
     for i in range(len(df_punti) - 1):
         p1 = df_punti.iloc[i]
         p2 = df_punti.iloc[i+1]
-        
-        # Calcoliamo la distanza tra i due punti (in metri, poi convertita in km)
         dist_km = p2['distanza_km'] - p1['distanza_km']
         quota_media = (p1['ele'] + p2['ele']) / 2.0
         
-        # Troviamo in quale fascia ricade la quota media del segmento
         for min_q, max_q, nome in limiti:
             if min_q <= quota_media < max_q:
                 distanze_fasce[nome] += dist_km
@@ -213,7 +210,6 @@ def calcola_fasce_altimetriche(df_punti):
         else:
             percentuale = 0.0
             
-        # Mostriamo nella tabella solo le fasce effettivamente toccate dal percorso (distanza > 0)
         if dist_km > 0.001:
             dati_fasce.append({
                 "Fascia Altimetrica": nome,
@@ -226,7 +222,7 @@ def calcola_fasce_altimetriche(df_punti):
 # --- ALGORITMO PACER VIRTUALE (MINETTI / NAISMITH) ---
 def calcola_pacer_tabella(df_punti, ore_target):
     if df_punti.empty or ore_target <= 0:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
         
     tot_dist_km = df_punti['distanza_km'].max()
     secondi_target = ore_target * 3600
@@ -262,22 +258,28 @@ def calcola_pacer_tabella(df_punti, ore_target):
             "Km": km,
             "D+": round(disl_positivo, 0),
             "D-": round(disl_negativo, 0),
-            "Sforzo": peso_sforzo
+            "Sforzo": peso_sforzo,
+            # Teniamo traccia della coordinata approssimativa di questo chilometro per calcolare il meteo in corsa
+            "lat": g['lat'].mean(),
+            "lon": g['lon'].mean(),
+            "ele": g['ele'].mean()
         })
         
     tot_sforzo = sum(pesi_km)
     if tot_sforzo == 0:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
         
     secondi_per_unita = secondi_target / tot_sforzo
     cronologia_cumulata = 0.0
     tabella_pacer = []
+    mappa_orari_km = {} # Mappa fondamentale per sapere a che ORA esatta passerai in ciascun chilometro
     
     for item in dati_km:
         secondi_km = item["Sforzo"] * secondi_per_unita
         passo_minuti_decimale = secondi_km / 60.0
         
         minuti = int(passo_minuti_decimale)
+        secondi = int((passo_minuti_decimale - minutes := minuti) * 60) # compatibilità inline
         secondi = int((passo_minuti_decimale - minuti) * 60)
         passo_str = f"{minuti:02d}:{secondi:02d} /km"
         
@@ -294,9 +296,98 @@ def calcola_pacer_tabella(df_punti, ore_target):
             "Tempo Cumulato": tempo_passaggio
         })
         
-    return pd.DataFrame(tabella_pacer)
+        # Salviamo la quota, le coordinate e i secondi cumulati per mappare l'ora del passaggio meteo
+        mappa_orari_km[item['Km']] = {
+            "lat": item["lat"],
+            "lon": item["lon"],
+            "ele": item["ele"],
+            "secondi_da_partenza": cronologia_cumulata
+        }
+        
+    return pd.DataFrame(tabella_pacer), mappa_orari_km
 
-# --- CODICE EMBED MAPPA SATELLITARE 3D CON ALTOMETRIA SINCRONA CHART.JS ---
+# --- ICONE METEO OPEN-METEO ---
+def interpreta_wmo_code(code):
+    # Standard WMO Weather Interpretation Codes
+    mappa_codici = {
+        0: "☀️ Sereno",
+        1: "🌤️ Prevalentemente Sereno", 2: "⛅ Poco Nuvoloso", 3: "☁️ Coperto",
+        45: "🌫️ Nebbia", 48: "🌫️ Nebbia con Brina",
+        51: "🌧️ Pioggerellina leggera", 53: "🌧️ Pioggerellina moderata", 55: "🌧️ Pioggerellina fitta",
+        61: "🌧️ Pioggia debole", 63: "🌧️ Pioggia moderata", 65: "🌧️ Pioggia forte",
+        71: "🌨️ Neve debole", 73: "🌨️ Neve moderata", 75: "🌨️ Neve forte",
+        77: "🌨️ Granelli di neve",
+        80: "🌧️ Acquazzone debole", 81: "🌧️ Acquazzone moderato", 82: "🌧️ Acquazzone violento",
+        85: "🌨️ Rovescio di neve debole", 86: "🌨️ Rovescio di neve forte",
+        95: "⚡ Temporale", 96: "⚡⛈️ Temporale con grandine debole", 99: "⚡⛈️ Temporale con forte grandine"
+    }
+    return mappa_codici.get(code, "❓ Sconosciuto")
+
+# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE ---
+@st.cache_data(ttl=600) # Salviamo in cache per 10 minuti per evitare continue chiamate API rallentando il browser
+def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
+    # Scarichiamo le previsioni orarie per la coordinata centrale del percorso
+    giorno_inizio_str = data_partenza.strftime("%Y-%m-%d")
+    giorno_fine = data_partenza + timedelta(days=2)
+    giorno_fine_str = giorno_fine.strftime("%Y-%m-%d")
+    
+    url = f"https://api.open-meteo.com/en/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto&start_date={giorno_inizio_str}&end_date={giorno_fine_str}"
+    
+    try:
+        res = requests.get(url).json()
+        if "hourly" not in res:
+            return []
+            
+        times = res["hourly"]["time"]
+        temps = res["hourly"]["temperature_2m"]
+        codes = res["hourly"]["weather_code"]
+        winds = res["hourly"]["wind_speed_10m"]
+        elevation_modello = res.get("elevation", 500) # Quota media usata dal modello meteo per quella griglia
+        
+        previsioni_lungo_corsa = []
+        
+        # Campioniamo i dati ogni tot chilometri per non affollare la schermata (es. max 6 punti intermedi della gara)
+        km_totali = len(mappa_orari)
+        step_campionamento = max(1, km_totali // 6)
+        
+        for km in range(1, km_totali + 1, step_campionamento):
+            dati_km = mappa_orari[km]
+            
+            # Calcoliamo l'orario effettivo di passaggio in quel chilometro
+            tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
+            ora_passaggio_arrotondata = tempo_passaggio.replace(minute=0, second=0, microsecond=0)
+            
+            # Troviamo l'indice orario corrispondente nei dati di Open-Meteo
+            ora_passaggio_iso = ora_passaggio_arrotondata.strftime("%Y-%m-%dT%H:%M")
+            
+            try:
+                idx = times.index(ora_passaggio_iso)
+                temp_modello = temps[idx]
+                codice_wmo = codes[idx]
+                vento = winds[idx]
+                
+                # --- APPLICAZIONE GRADIENTE TERMICO VERTICALE REALISTICO ---
+                # Corregge la temperatura stimata dal modello di circa 0.65°C ogni 100m di differenza
+                differenza_quota = dati_km["ele"] - elevation_modello
+                temperatura_corretta = temp_modello - (differenza_quota / 100.0 * 0.65)
+                
+                previsioni_lungo_corsa.append({
+                    "Settore Percorso": f"Km {km} (Quota {dati_km['ele']:.0f}m s.l.m.)",
+                    "Orario di Passaggio": tempo_passaggio.strftime("%d/%m %H:%M"),
+                    "Meteo Previsto": interpreta_wmo_code(codice_wmo),
+                    "Temp. Corretta in Quota": f"{temperatura_corretta:.1f} °C",
+                    "Vento al Suolo": f"{vento:.1f} km/h",
+                    "Temp. Base Modello (rif.)": f"{temp_modello:.1f} °C"
+                })
+            except ValueError:
+                # Se l'orario di passaggio calcolato cade oltre la previsione disponibile (es. oltre i 3 giorni)
+                continue
+                
+        return previsioni_lungo_corsa
+    except Exception as e:
+        return []
+
+# --- CODICE EMBED MAPPA SATELLITARE 3D ---
 
 def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, punti_altimetria):
     geojson_str = json.dumps(geojson_traccia)
@@ -711,6 +802,14 @@ with st.sidebar:
         help="Inserisci il tempo target finale. Il sistema distribuirà il passo per km tenendo conto del dislivello reale."
     )
     
+    # --- CONFIGURAZIONE DATA E ORA PARTENZA METEO ---
+    st.markdown("---")
+    st.subheader("⏱️ Configurazione Partenza")
+    data_giorno = st.date_input("Giorno Gara / Partenza", datetime.now().date())
+    ora_partenza = st.time_input("Ora di Partenza", datetime.now().time())
+    
+    data_partenza_completa = datetime.combine(data_giorno, ora_partenza)
+    
     st.markdown("---")
     st.subheader("Performance")
     semplifica = st.selectbox(
@@ -752,7 +851,26 @@ if uploaded_file:
         col2.metric("Dislivello Positivo", f"{d_pos:.0f} m+")
         col3.metric("Passaggi Tecnici (Sopra Soglia)", f"{dist_tech / 1000.0:.2f} km")
         
-        # --- TABELLA FASCE ALTIMETRICHE (NUOVA INSERZIONE) ---
+        # --- CALCOLO TABELLA PACER & ORARI PASSAGGIO ---
+        df_pacer, mappa_orari = calcola_pacer_tabella(df_punti, ore_target)
+        
+        # --- SEZIONE METEO DINAMICO LUNGO IL PERCORSO (NUOVA INSERZIONE) ---
+        st.markdown("---")
+        st.subheader("🌤️ Bollettino Meteo in Corsa (Gradiente Termico Verticale)")
+        st.caption("Il sistema calcola l'ora esatta di passaggio in ogni settore della gara in base al tuo pacer ed interroga Open-Meteo correggendo la temperatura in base all'altitudine effettiva in quel punto!")
+        
+        centro_lat = df_punti['lat'].mean()
+        centro_lon = df_punti['lon'].mean()
+        
+        previsioni_strada = scarica_meteo_percorso(centro_lat, centro_lon, data_partenza_completa, mappa_orari, ore_target)
+        
+        if previsioni_strada:
+            df_meteo = pd.DataFrame(previsioni_strada)
+            st.dataframe(df_meteo, use_container_width=True, hide_index=True)
+        else:
+            st.warning("⚠️ Impossibile caricare le previsioni meteo per questa coordinata o l'orario di arrivo supera la finestra di previsione a 3 giorni.")
+        
+        # --- TABELLA FASCE ALTIMETRICHE ---
         st.markdown("---")
         st.subheader("📊 Ripartizione del Percorso per Quote Altimetriche")
         st.caption("Fasce altimetriche toccate dal tracciato con distanza esatta e percentuale sul totale del percorso.")
@@ -761,10 +879,8 @@ if uploaded_file:
         if not df_fasce.empty:
             col_tab, col_graf = st.columns([1, 1])
             with col_tab:
-                # Tabella formattata ed elegante
                 st.dataframe(df_fasce, use_container_width=True, hide_index=True)
             with col_graf:
-                # Barra orizzontale in Streamlit per visualizzare la densità
                 st.bar_chart(df_fasce, x="Fascia Altimetrica", y="Percentuale (%)", color="#28C864")
         else:
             st.info("Nessun dato altimetrico rilevato nel file GPX.")
@@ -774,9 +890,6 @@ if uploaded_file:
         # Mappa 3D Reale con Altimetria Integrata
         st.subheader("🏔️ Mappa Alpinistica 3D Satellitare & Profilo Sincronizzato")
         st.caption("💡 Trascina con il tasto destro per inclinare la montagna. Passa il mouse sul profilo altimetrico sotto la mappa per muovere il cursore azzurro sulla traccia 3D!")
-        
-        centro_lat = df_punti['lat'].mean()
-        centro_lon = df_punti['lon'].mean()
         
         lista_punti_json = df_punti[['distanza_km', 'ele', 'lat', 'lon']].to_dict(orient='records')
         
@@ -821,7 +934,6 @@ if uploaded_file:
         st.subheader("🏃‍♂️ Tabella di Marcia e Pacer Naismith-Minetti")
         st.write(f"Modello di passo personalizzato calibrato sulla salita e sulla discesa per completare il percorso in **{ore_target} ore**.")
         
-        df_pacer = calcola_pacer_tabella(df_punti, ore_target)
         if not df_pacer.empty:
             st.dataframe(df_pacer, use_container_width=True, hide_index=True)
         else:
