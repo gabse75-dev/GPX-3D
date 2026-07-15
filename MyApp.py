@@ -279,7 +279,6 @@ def calcola_pacer_tabella(df_punti, ore_target):
         passo_minuti_decimale = secondi_km / 60.0
         
         minuti = int(passo_minuti_decimale)
-        secondi = int((passo_minuti_decimale - minutes := minuti) * 60) # compatibilità inline
         secondi = int((passo_minuti_decimale - minuti) * 60)
         passo_str = f"{minuti:02d}:{secondi:02d} /km"
         
