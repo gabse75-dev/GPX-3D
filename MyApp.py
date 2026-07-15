@@ -376,8 +376,9 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
                 })
                 
         return previsioni_lungo_corsa
-    except Exception as e:
-        st.sidebar.error(f"Errore API Meteo: {e}")
+except Exception as e:
+        # Questo stamperà l'errore esatto direttamente sotto il titolo del meteo!
+        st.error(f"Dettaglio Errore Meteo: {e}")
         return []
 
 # --- CODICE EMBED MAPPA SATELLITARE 3D ---
