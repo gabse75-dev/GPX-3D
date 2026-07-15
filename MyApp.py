@@ -281,7 +281,6 @@ def calcola_pacer_tabella(df_punti, ore_target):
         secondi = int((passo_minuti_decimale - minuti) * 60)
         passo_str = f"{minuti:02d}:{secondi:02d} /km"
         
-        cronologia_cumulata += seconds_km = secondi_km
         cronologia_cumulata += secondi_km
         ore_cum = int(cronologia_cumulata / 3600)
         min_cum = int((cronologia_cumulata % 3600) / 60)
