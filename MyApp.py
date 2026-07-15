@@ -137,7 +137,7 @@ def analizza_percorso(punti, soglia_pendenza, step_semplificazione=1):
         else:
             if in_tratto:
                 in_tratto = False
-                if lunghezza_tratto >= 150: # Almeno 150 metri per essere un vero tratto critico
+                if lunghezza_tratto >= 150:
                     km_inizio = distanze_punti[inizio_idx] / 1000.0
                     pendenza_media = (dislivello_tratto / lunghezza_tratto) * 100
                     tipo = "Salita" if dislivello_tratto > 0 else "Discesa"
@@ -169,6 +169,60 @@ def analizza_percorso(punti, soglia_pendenza, step_semplificazione=1):
                     
     return geojson_traccia, dist_totale, dislivello_pos, dist_tecnica, df_punti, tratti_critici
 
+# --- CALCOLO FASCE ALTIMETRICHE ---
+def calcola_fasce_altimetriche(df_punti):
+    if df_punti.empty or len(df_punti) < 2:
+        return pd.DataFrame()
+        
+    # Definiamo i limiti delle fasce
+    limiti = [
+        (-float('inf'), 1000, "Sotto i 1000 m"),
+        (1000, 1500, "Tra 1000 m e 1500 m"),
+        (1500, 2000, "Tra 1500 m e 2000 m"),
+        (2000, 2500, "Tra 2000 m e 2500 m"),
+        (2500, 3000, "Tra 2500 m e 3000 m"),
+        (3000, 3500, "Tra 3000 m e 3500 m"),
+        (3500, 4000, "Tra 3500 m e 4000 m"),
+        (4000, float('inf'), "Sopra i 4000 m")
+    ]
+    
+    distanze_fasce = {nome: 0.0 for _, _, nome in limiti}
+    
+    # Scorriamo i punti per calcolare la distanza percorsa in ciascuna fascia
+    for i in range(len(df_punti) - 1):
+        p1 = df_punti.iloc[i]
+        p2 = df_punti.iloc[i+1]
+        
+        # Calcoliamo la distanza tra i due punti (in metri, poi convertita in km)
+        dist_km = p2['distanza_km'] - p1['distanza_km']
+        quota_media = (p1['ele'] + p2['ele']) / 2.0
+        
+        # Troviamo in quale fascia ricade la quota media del segmento
+        for min_q, max_q, nome in limiti:
+            if min_q <= quota_media < max_q:
+                distanze_fasce[nome] += dist_km
+                break
+                
+    tot_dist = sum(distanze_fasce.values())
+    
+    dati_fasce = []
+    for _, _, nome in limiti:
+        dist_km = distanze_fasce[nome]
+        if tot_dist > 0:
+            percentuale = (dist_km / tot_dist) * 100.0
+        else:
+            percentuale = 0.0
+            
+        # Mostriamo nella tabella solo le fasce effettivamente toccate dal percorso (distanza > 0)
+        if dist_km > 0.001:
+            dati_fasce.append({
+                "Fascia Altimetrica": nome,
+                "Distanza (Km)": round(dist_km, 2),
+                "Percentuale (%)": round(percentuale, 1)
+            })
+            
+    return pd.DataFrame(dati_fasce)
+
 # --- ALGORITMO PACER VIRTUALE (MINETTI / NAISMITH) ---
 def calcola_pacer_tabella(df_punti, ore_target):
     if df_punti.empty or ore_target <= 0:
@@ -199,9 +253,9 @@ def calcola_pacer_tabella(df_punti, ore_target):
         
         peso_sforzo = dist_effettiva
         if disl_positivo > 0:
-            peso_sforzo += (disl_positivo / 100.0) # Naismith: 100m D+ = 1km piatto fittizio
+            peso_sforzo += (disl_positivo / 100.0)
         if disl_negativo > 0 and pendenza_media < -8:
-            peso_sforzo += (disl_negativo / 250.0) # Impatto eccentrico discesa tecnica
+            peso_sforzo += (disl_negativo / 250.0)
             
         pesi_km.append(peso_sforzo)
         dati_km.append({
@@ -411,7 +465,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
             
             let cursorMarker = null;
 
-            // Generatore icone direzionali
             function creaImmagineFreccia() {{
                 const size = 24;
                 const canvas = document.createElement('canvas');
@@ -445,7 +498,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     'lineMetrics': true
                 }});
 
-                // Traccia principale
                 map.addLayer({{
                     'id': 'gpx-route-layer',
                     'type': 'line',
@@ -460,7 +512,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     }}
                 }});
 
-                // Frecce
                 map.addLayer({{
                     'id': 'gpx-route-arrows',
                     'type': 'symbol',
@@ -479,7 +530,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     }}
                 }});
 
-                // --- INIZIALIZZAZIONE DEL GRAFICO INTEGRATO ---
                 const ctxChart = document.getElementById('elevationChart').getContext('2d');
                 const labels = datiAltimetria.map(p => p.distanza_km.toFixed(2));
                 const quote = datiAltimetria.map(p => p.ele);
@@ -526,7 +576,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                                 ticks: {{ color: '#94a3b8' }}
                             }}
                         }},
-                        // Sincronizzazione in tempo reale al passaggio del mouse
                         onHover: (event, chartElements) => {{
                             if (chartElements && chartElements.length > 0) {{
                                 const index = chartElements[0].index;
@@ -554,7 +603,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     }}
                 }});
 
-                // Ascolta segnali esterni per il volo 3D (dalla tabella dei tratti critici)
                 window.addEventListener('message', (event) => {{
                     try {{
                         const data = JSON.parse(event.data);
@@ -570,7 +618,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     }} catch(err) {{}}
                 }});
 
-                // Interattività al click sulla linea
                 map.on('click', 'gpx-route-layer', (e) => {{
                     const coordinates = e.lngLat;
                     const properties = e.features[0].properties;
@@ -608,7 +655,6 @@ def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, pu
                     map.getCanvas().style.cursor = '';
                 }});
 
-                // Bottoni Km
                 const btnGroup = document.getElementById('btn-group');
                 keyPoints.forEach((kp) => {{
                     const btn = document.createElement('button');
@@ -657,7 +703,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Pacer Naismith-Minetti")
     ore_target = st.number_input(
-        "Tempo Obiettivo Percorso (Ore)", 
+        "Tempo Obiettivo (Ore)", 
         min_value=1.0, 
         max_value=100.0, 
         value=13.0, 
@@ -700,12 +746,29 @@ if uploaded_file:
                 "bearing": float(bearing_sentiero)
             })
 
-        # Metriche
+        # Metriche Principali
         col1, col2, col3 = st.columns(3)
-        col1.metric("Lunghezza", f"{dist_tot / 1000.0:.2f} km")
+        col1.metric("Lunghezza Percorso", f"{dist_tot / 1000.0:.2f} km")
         col2.metric("Dislivello Positivo", f"{d_pos:.0f} m+")
-        col3.metric("Passaggi Tecnici", f"{dist_tech / 1000.0:.2f} km")
+        col3.metric("Passaggi Tecnici (Sopra Soglia)", f"{dist_tech / 1000.0:.2f} km")
         
+        # --- TABELLA FASCE ALTIMETRICHE (NUOVA INSERZIONE) ---
+        st.markdown("---")
+        st.subheader("📊 Ripartizione del Percorso per Quote Altimetriche")
+        st.caption("Fasce altimetriche toccate dal tracciato con distanza esatta e percentuale sul totale del percorso.")
+        
+        df_fasce = calcola_fasce_altimetriche(df_punti)
+        if not df_fasce.empty:
+            col_tab, col_graf = st.columns([1, 1])
+            with col_tab:
+                # Tabella formattata ed elegante
+                st.dataframe(df_fasce, use_container_width=True, hide_index=True)
+            with col_graf:
+                # Barra orizzontale in Streamlit per visualizzare la densità
+                st.bar_chart(df_fasce, x="Fascia Altimetrica", y="Percentuale (%)", color="#28C864")
+        else:
+            st.info("Nessun dato altimetrico rilevato nel file GPX.")
+            
         st.markdown("---")
         
         # Mappa 3D Reale con Altimetria Integrata
@@ -717,10 +780,7 @@ if uploaded_file:
         
         lista_punti_json = df_punti[['distanza_km', 'ele', 'lat', 'lon']].to_dict(orient='records')
         
-        # Generiamo il codice HTML passando tutti i 5 parametri corretti
         mappa_html = genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, lista_punti_json)
-        
-        # Mandiamo in rendering l'HTML unificato (Mappa + Grafico)
         components.html(mappa_html, height=altezza_mappa + 250)
         
         # --- TABELLA INTERATTIVA DEI TRATTI CRITICI ---
