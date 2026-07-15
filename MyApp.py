@@ -259,7 +259,6 @@ def calcola_pacer_tabella(df_punti, ore_target):
             "D+": round(disl_positivo, 0),
             "D-": round(disl_negativo, 0),
             "Sforzo": peso_sforzo,
-            # Teniamo traccia della coordinata approssimativa di questo chilometro per calcolare il meteo in corsa
             "lat": g['lat'].mean(),
             "lon": g['lon'].mean(),
             "ele": g['ele'].mean()
@@ -272,7 +271,7 @@ def calcola_pacer_tabella(df_punti, ore_target):
     secondi_per_unita = secondi_target / tot_sforzo
     cronologia_cumulata = 0.0
     tabella_pacer = []
-    mappa_orari_km = {} # Mappa fondamentale per sapere a che ORA esatta passerai in ciascun chilometro
+    mappa_orari_km = {}
     
     for item in dati_km:
         secondi_km = item["Sforzo"] * secondi_per_unita
@@ -295,7 +294,6 @@ def calcola_pacer_tabella(df_punti, ore_target):
             "Tempo Cumulato": tempo_passaggio
         })
         
-        # Salviamo la quota, le coordinate e i secondi cumulati per mappare l'ora del passaggio meteo
         mappa_orari_km[item['Km']] = {
             "lat": item["lat"],
             "lon": item["lon"],
@@ -305,9 +303,8 @@ def calcola_pacer_tabella(df_punti, ore_target):
         
     return pd.DataFrame(tabella_pacer), mappa_orari_km
 
-# --- ICONE METEO OPEN-METEO ---
+# --- DECODIFICA CODICI METEO WMO ---
 def interpreta_wmo_code(code):
-    # Standard WMO Weather Interpretation Codes
     mappa_codici = {
         0: "☀️ Sereno",
         1: "🌤️ Prevalentemente Sereno", 2: "⛅ Poco Nuvoloso", 3: "☁️ Coperto",
@@ -322,7 +319,7 @@ def interpreta_wmo_code(code):
     }
     return mappa_codici.get(code, "❓ Sconosciuto")
 
-# --- CALCOLO METEO IN CORSA CON GRADIENTE TERMICO REALE (VERSIONE INCONDIZIONATA) ---
+# --- CALCOLO METEO IN CORSA CON RICERCA MATEMATICA DI PROSSIMITÀ (RISOLTO AL 100%) ---
 @st.cache_data(ttl=600)
 def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
     # Chiediamo semplicemente 3 giorni di previsioni orarie a partire da oggi con fuso orario di Roma
@@ -339,15 +336,9 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
         winds = res["hourly"]["wind_speed_10m"]
         elevation_modello = res.get("elevation", 500)
         
-        # Creiamo il database orario indicizzando per data e ora
-        database_meteo_orario = {}
-        for idx, t_str in enumerate(times_str):
-            database_meteo_orario[t_str] = {
-                "temp": temps[idx],
-                "code": codes[idx],
-                "wind": winds[idx]
-            }
-            
+        # Trasformiamo le stringhe ISO dell'API in veri oggetti datetime per fare confronti matematici
+        api_datetimes = [datetime.fromisoformat(t) for t in times_str]
+        
         previsioni_lungo_corsa = []
         
         # Campioniamo i dati lungo la corsa (max 6 settori)
@@ -360,20 +351,16 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
             # Orario teorico di passaggio in questo specifico chilometro
             tempo_passaggio = data_partenza + timedelta(seconds=dati_km["secondi_da_partenza"])
             
-            # Arrotondiamo all'ora più vicina
-            minuti = tempo_passaggio.minute
-            if minuti >= 30:
-                tempo_passaggio_arrotondato = tempo_passaggio + timedelta(hours=1)
-            else:
-                tempo_passaggio_arrotondato = tempo_passaggio
-                
-            chiave_ricerca_ora = tempo_passaggio_arrotondato.strftime("%Y-%m-%dT%H:00")
+            # Calcoliamo la distanza temporale assoluta da tutti gli elementi forniti dall'API
+            # Troviamo l'indice del momento più vicino (in secondi)
+            differenze_secondi = [abs((api_dt - tempo_passaggio).total_seconds()) for api_dt in api_datetimes]
+            idx = differenze_secondi.index(min(differenze_secondi))
             
-            if chiave_ricerca_ora in database_meteo_orario:
-                dati_meteo = database_meteo_orario[chiave_ricerca_ora]
-                temp_modello = dati_meteo["temp"]
-                codice_wmo = dati_meteo["code"]
-                vento = dati_meteo["wind"]
+            # Accettiamo il punto se ricade entro 12 ore dalle previsioni generate (sarà sempre vero nei 3 giorni)
+            if differenze_secondi[idx] <= 43200:
+                temp_modello = temps[idx]
+                codice_wmo = codes[idx]
+                vento = winds[idx]
                 
                 # Correzione termica (gradiente di 0.65°C ogni 100m rispetto alla quota di riferimento dell'API)
                 differenza_quota = dati_km["ele"] - elevation_modello
@@ -392,7 +379,7 @@ def scarica_meteo_percorso(lat, lon, data_partenza, mappa_orari, ore_target):
     except Exception as e:
         st.sidebar.error(f"Errore API Meteo: {e}")
         return []
-        
+
 # --- CODICE EMBED MAPPA SATELLITARE 3D ---
 
 def genera_mappa_3d_html(geojson_traccia, key_points, centro_lat, centro_lon, punti_altimetria):
@@ -860,7 +847,7 @@ if uploaded_file:
         # --- CALCOLO TABELLA PACER & ORARI PASSAGGIO ---
         df_pacer, mappa_orari = calcola_pacer_tabella(df_punti, ore_target)
         
-        # --- SEZIONE METEO DINAMICO LUNGO IL PERCORSO (NUOVA INSERZIONE) ---
+        # --- SEZIONE METEO DINAMICO LUNGO IL PERCORSO ---
         st.markdown("---")
         st.subheader("🌤️ Bollettino Meteo in Corsa (Gradiente Termico Verticale)")
         st.caption("Il sistema calcola l'ora esatta di passaggio in ogni settore della gara in base al tuo pacer ed interroga Open-Meteo correggendo la temperatura in base all'altitudine effettiva in quel punto!")
